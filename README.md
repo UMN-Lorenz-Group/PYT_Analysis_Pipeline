@@ -1,5 +1,5 @@
 # PYT Analysis Pipeline Steps
-## A Genomic Selection Pipeline for the analysis of Preliminary Yield Trials conducted in 2024
+## A Genomic Selection Pipeline for the analysis of Preliminary Yield Trials conducted in 2024 in the UMN Soybean Breeding Program
 
 This repository contains the code for the complete pipeline for processing phenotypic and genotypic data for the PYT24 trials, integrating QC, modeling, GWAS, and genomic prediction steps. 
 
