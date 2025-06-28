@@ -9,8 +9,8 @@ This repository contains the code for the complete pipeline for processing pheno
 
 1. **Load PYT24 trials data** and extract relevant data.
 2. **QC:** Remove outliers and explore data integrity.
-3. **Loc-wise BLUEs
-4. Estimate reliabilities.**
+3. **Location-wise BLUEs** - (Single Site Estimation of BLUEs)
+4. **Estimate reliabilities.**
     - Accuracies of prediction = sqrt(reliabilities) (heritabilities)
 ---
 
