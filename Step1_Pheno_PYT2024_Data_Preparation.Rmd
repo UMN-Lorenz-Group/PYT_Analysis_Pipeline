@@ -1,0 +1,260 @@
+---
+title: "PYT 2024 Data Preparation and Quality Control"
+author: "Vishnu Ramasubramanian"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# Introduction
+
+This document describes the R workflow for preparing and cleaning the 2024 Preliminary Yield Trial (PYT) data. Steps include:
+
+- Reading the raw data
+- Filtering and transforming trait data
+- Running ANOVA for outlier detection
+- Performing quality control
+- Saving the final cleaned dataset
+
+---
+
+# Load Data
+
+## Set Working Directory
+
+```{r, eval=FALSE}
+setwd("C:/Users/vramasub/Desktop/PYT2024_Analysis/")
+```
+
+## Read CSV Data
+
+```{r, eval=FALSE}
+All_PYT_2024_V0 <- read.csv("PYTs2024_Data_V2.csv", header = TRUE)
+```
+
+Rename the Test column:
+
+```{r, eval=FALSE}
+colnames(All_PYT_2024_V0)[which(colnames(All_PYT_2024_V0) %in% "Test..")] <- "Test"
+```
+
+Convert Test to a factor and create composite keys:
+
+```{r, eval=FALSE}
+All_PYT_2024_V0$Test <- as.factor(All_PYT_2024_V0$Test)
+All_PYT_2024_V0$LocTest <- paste(All_PYT_2024_V0$Book.Name, All_PYT_2024_V0$Test, sep = "-")
+All_PYT_2024_V0$StrLocTestRep <- paste(All_PYT_2024_V0$Alias.pedigree,
+                                       All_PYT_2024_V0$LocTest,
+                                       All_PYT_2024_V0$RepNo, sep = "-")
+```
+
+---
+
+# Remove Rows with Missing IDs
+
+Identify rows with missing `UniqID`:
+
+```{r, eval=FALSE}
+naInd1 <- which(is.na(All_PYT_2024_V0$UniqID))
+```
+
+Remove those rows:
+
+```{r, eval=FALSE}
+if(length(naInd1) > 0){
+  All_PYT_2024_V1 <- All_PYT_2024_V0[-naInd1,]
+} else {
+  All_PYT_2024_V1 <- All_PYT_2024_V0
+}
+```
+
+Check dimensions:
+
+```{r, eval=FALSE}
+dim(All_PYT_2024_V1)
+# [1] 3031 42
+```
+
+---
+
+# Cleaning Maturity Rating
+
+Ensure maturity ratings stay within range:
+
+```{r, eval=FALSE}
+All_PYT_2024_V1$`Maturity.rating` <- as.numeric(as.character(All_PYT_2024_V1$`Maturity.rating`))
+All_PYT_2024_V1$`Maturity.rating`[All_PYT_2024_V1$`Maturity.rating` > 10] <- NA
+All_PYT_2024_V2 <- All_PYT_2024_V1[!is.na(All_PYT_2024_V1$`Maturity.rating`), ]
+```
+
+---
+
+# Prepare Yield Data
+
+Convert yield column to numeric:
+
+```{r, eval=FALSE}
+All_PYT_2024_V2$Yield_bu_acre_13 <- as.numeric(All_PYT_2024_V2$Yield_bu_acre_13)
+```
+
+Assign to working data:
+
+```{r, eval=FALSE}
+All_PYT_2024 <- All_PYT_2024_V2
+```
+
+---
+
+# Define Traits and Formulas
+
+List of traits:
+
+```{r}
+traits <- c("Yield_bu_acre_13", "Oil", "Protein", "Maturity.rating")
+```
+
+Define model formulas:
+
+```{r}
+formulas <- list(
+  Yield_bu_acre_13 = Yield_bu_acre_13 ~ Book.Name + RepNo:Book.Name + Alias.pedigree,
+  Oil = Oil ~ Book.Name + Alias.pedigree,
+  Protein = Protein ~ Book.Name + Alias.pedigree,
+  Maturity.rating = Maturity.rating ~ Book.Name + RepNo:Book.Name + Alias.pedigree
+)
+```
+
+Alternative formulas with interactions:
+
+```{r}
+formulas_GL <- list(
+  Yield_bu_acre_13 = Yield_bu_acre_13 ~ Book.Name * Alias.pedigree + RepNo:Book.Name,
+  Oil = Oil ~ Book.Name * Alias.pedigree,
+  Protein = Protein ~ Book.Name * Alias.pedigree,
+  Maturity.rating = Maturity.rating ~ Book.Name * Alias.pedigree + RepNo:Book.Name
+)
+```
+
+---
+
+# Function to Fit ANOVA and Remove Outliers
+
+```{r, eval=FALSE}
+process_trait <- function(trait, formula, data) {
+  aov_model <- aov(formula, data = data)
+  predictions <- fitted(aov_model)
+  residuals <- residuals(aov_model)
+  rmse <- sqrt(mean(residuals^2, na.rm = TRUE))
+  std_residuals <- residuals / rmse
+
+  outlier_indices <- which(abs(std_residuals) > 2.5)
+
+  if(length(aov_model$na.action) > 0){
+    data.filt <- data[-aov_model$na.action,]
+  } else {
+    data.filt <- data
+  }
+
+  filtered_data <- data.filt[-outlier_indices, ]
+  filtered_data[paste0(trait, "_Pred")] <- predictions[-outlier_indices]
+  filtered_data[paste0(trait, "_StdResid")] <- std_residuals[-outlier_indices]
+
+  return(filtered_data)
+}
+```
+
+---
+
+# Process Each Trait
+
+```{r, eval=FALSE}
+results_list <- lapply(traits, function(trait) {
+  process_trait(trait, formulas[[trait]], All_PYT_2024)
+})
+```
+
+---
+
+# Prepare Filtered Data
+
+Select relevant columns:
+
+```{r, eval=FALSE}
+results_list_filt <- lapply(seq_along(results_list), function(x) {
+  if(traits[x] == "Yield_bu_acre_13") {
+    yldInd <- which(colnames(results_list[[x]]) %in% c("Yield_bu_acre_13","StrLocTestRep"))
+    selCols <- c(1:yldInd[1], yldInd[2])
+    results_list[[x]][, selCols]
+  } else {
+    trtInd <- which(colnames(results_list[[x]]) %in% c(traits[x],"StrLocTestRep"))
+    results_list[[x]][, trtInd]
+  }
+})
+```
+
+Merge all trait data:
+
+```{r, eval=FALSE}
+All_PYT_2024_Trts <- Reduce(function(x, y) merge(x, y, by = "StrLocTestRep", all = TRUE), results_list_filt)
+dim(All_PYT_2024_Trts)
+```
+
+---
+
+# Quality Control
+
+Remove “Bad” plots:
+
+```{r, eval=FALSE}
+All_PYT_2024_Trts_QC <- subset(All_PYT_2024_Trts, Plot.Status != "Bad")
+dim(All_PYT_2024_Trts_QC)
+```
+
+Summarize traits:
+
+```{r, eval=FALSE}
+summary(All_PYT_2024_Trts_QC$Yield_bu_acre_13)
+summary(All_PYT_2024_Trts_QC$Oil)
+summary(All_PYT_2024_Trts_QC$Protein)
+```
+
+Identify low-yielding lines:
+
+```{r, eval=FALSE}
+yldlt10 <- which(All_PYT_2024_Trts_QC$Yield_bu_acre_13 <= 10)
+table(All_PYT_2024_Trts_QC[yldlt10, "Entry.Book.Name"])
+```
+
+Remove problematic trials:
+
+```{r, eval=FALSE}
+Tst16WAInd <- which(All_PYT_2024_Trts_QC$Test == "16" &
+                    All_PYT_2024_Trts_QC$Book.Name == "WA")
+
+rmQC2Ind <- union(Tst16WAInd, yldlt10)
+All_PYT_2024_Trts_QC_V2 <- All_PYT_2024_Trts_QC[-rmQC2Ind, ]
+dim(All_PYT_2024_Trts_QC_V2)
+table(All_PYT_2024_Trts_QC_V2$Book.Name)
+```
+
+---
+
+# Save Cleaned Data
+
+Export final cleaned data:
+
+```{r, eval=FALSE}
+write.csv(All_PYT_2024_Trts_QC_V2, "PYT_2024_All_Traits_QC_V2.csv",
+          quote = FALSE, row.names = FALSE)
+```
+
+---
+
+# Conclusion
+
+This pipeline ensures a robust, cleaned dataset for downstream analysis. The final data set is free of outliers and low-quality records, ready for statistical modeling and reporting.
+
+

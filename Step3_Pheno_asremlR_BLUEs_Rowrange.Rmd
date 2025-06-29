@@ -1,0 +1,323 @@
+---
+title: "Demo for BLUEs Estimation with ASReml Models including Row & Range Effects with PYT2024 Data"
+author: "Vishnu Ramasubramanian"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# Introduction
+
+This document explains an R script for fitting **ASReml models with Row and Range effects**. The script is intended for analyzing multi-location, multi-trait field trial data in plant breeding experiments.
+
+---
+
+# Purpose of the Code
+
+The purpose of this code is to fit location-specific ASReml linear models for multiple traits. These models:
+
+- account for **row and range effects** (i.e. spatial effects) in the field layout
+- estimate BLUEs (Best Linear Unbiased Estimates) for genotypes
+- optionally estimate strain means per test
+- perform Wald tests to evaluate significance of fixed effects
+
+Row and Range capture systematic spatial variability in field trials, improving the precision of estimates for genotype performance.
+
+---
+
+# Detailed Walkthrough of the Code
+
+---
+
+## Initialize Lists
+
+We start by initializing lists to store results for each trait:
+
+```{r}
+model_Loc_RR_Trts_List <- list()
+BLUEs_Loc_RR_Trts_List <- list()
+BLUEs_LocTst_RR_Trts_List <- list()
+wald.model_Loc_RR_Trts_List <- list()
+```
+
+These lists will hold:
+
+- fitted ASReml models for each location
+- BLUE predictions for strains
+- strain predictions within tests (if multiple tests exist)
+- Wald test results
+
+---
+
+## Loop Over Traits
+
+The script processes each trait separately:
+
+```{r, eval=FALSE}
+for(trait in trait.list) {
+  # analysis steps follow ...
+}
+```
+
+---
+
+## Filter Data for the Trait
+
+```{r, eval=FALSE}
+trtInd <- which(!is.na(data.regular[,trait]))
+data.regular.trait <- data.regular[trtInd,]
+data.regular.trait$Location <- as.factor(data.regular.trait$Location)
+Locations <- levels(factor(data.regular.trait$Location))
+```
+
+- Removes missing values for the trait.
+- Converts `Location` to a factor.
+- Retrieves all unique locations.
+
+---
+
+## Loop Over Locations
+
+The model is fit separately at each location:
+
+```{r, eval=FALSE}
+for(nLoc in 1:length(Locations)) {
+  loc <- Locations[nLoc]
+  data.loc <- data.regular.trait[data.regular.trait$Location == loc, ]
+```
+
+---
+
+## Convert Columns to Factors
+
+```{r, eval=FALSE}
+data.loc$Strain <- as.factor(data.loc$Strain)
+data.loc$Test <- as.factor(data.loc$Test)
+data.loc$RepNo <- as.factor(data.loc$RepNo)
+data.loc$Row <- as.factor(data.loc$Row)
+data.loc$Range <- as.factor(data.loc$Range)
+data.loc <- droplevels(data.loc)
+```
+
+Ensures categorical variables are treated as factors for ASReml.
+
+---
+
+## Construct the Model Formula
+
+Two different model formulas are used:
+
+- For **Yield** and **Maturity.rating**:
+
+    $$ \text{Trait} \sim \text{Test} + \text{Row} + \text{Range} + \text{Strain} + \text{RepNo}:\text{Test} $$
+
+- For other traits (e.g. Oil, Protein):
+
+    $$ \text{Trait} \sim \text{Strain} $$
+
+### Code:
+
+```{r, eval=FALSE}
+if(trait == "Yield" | trait == "Maturity.rating") {
+  fixedEqnRR <- paste(trait, "~ Test + Row + Range + Strain + RepNo:Test", sep="")
+} else {
+  fixedEqnRR <- paste(trait, "~ Strain", sep="")
+  rowPresent <- FALSE
+  testPresent <- FALSE
+}
+```
+
+---
+
+## Fit the ASReml Model
+
+We fit the model using ASReml, capturing warnings:
+
+```{r, eval=FALSE}
+model_Loc_RR <- tryCatch({
+  withCallingHandlers({
+    asreml(fixed = as.formula(fixedEqnRR),
+           data = data.loc,
+           workspace = "2048mb", ai.sing = TRUE)
+  }, warning = function(w) {
+    warningMessage <- conditionMessage(w)
+    print(paste("Warning captured:", warningMessage))
+    if (grepl("not converged", warningMessage)) {
+      warningMessages <<- warningMessage
+    }
+    invokeRestart("muffleWarning")
+  })
+}, error = function(e) {
+  print(paste("Error encountered:", e$message))
+})
+```
+
+---
+
+## Handle Convergence Warnings
+
+If convergence fails, the model is updated up to 5 times:
+
+```{r, eval=FALSE}
+if (!is.null(warningMessages)) {
+  while (grepl("not converged", warningMessages[length(warningMessages)]) && count <= 5) {
+    tryCatch({
+      withCallingHandlers({
+        model_Loc_RR <- update.asreml(model_Loc_RR)
+      }, warning = function(w) {
+        warningMessage <- conditionMessage(w)
+        print(paste("Warning captured:", warningMessage))
+        if (grepl("not converged", warningMessage)) {
+          warningMessages <<- warningMessage
+        } else {
+          warningMessages <<- "Iterations converged"
+          print(paste(warningMessages[length(warningMessages)]))
+        }
+      })
+    })
+    count <- count + 1
+  }
+}
+```
+
+---
+
+## Handle Singularities
+
+If errors due to singularities arise (e.g. when Row/Range effects are confounded), the model is refitted without Row/Range terms:
+
+```{r, eval=FALSE}
+if (!is.null(errorMessages)) {
+  if (grepl("singularities", errorMessages[length(errorMessages)])) {
+    fixedEqnRR <- paste(trait, "~ Test + Strain + RepNo:Test", sep="")
+    rowPresent <- FALSE
+    model_Loc_RR <- tryCatch({
+      asreml(fixed = as.formula(fixedEqnRR),
+             data = data.loc,
+             workspace = "2048mb", ai.sing = TRUE)
+    }, warning = function(w) {
+      # handle warnings
+    }, error = function(e) {
+      # handle errors
+    })
+  }
+}
+```
+
+---
+
+## Predict BLUEs
+
+If the model fits successfully, predictions are obtained:
+
+```{r, eval=FALSE}
+BLUEs_Loc_RR <- tryCatch({
+  withCallingHandlers({
+    if(rowPresent & testPresent) {
+      predict(model_Loc_RR, classify = "Strain",
+              present = c("Strain", "Test", "Row", "Range"),
+              workspace = "2048mb")
+    } else if (!rowPresent & testPresent) {
+      predict(model_Loc_RR, classify = "Strain",
+              present = c("Strain", "Test"),
+              workspace = "2048mb")
+    } else {
+      predict(model_Loc_RR, classify = "Strain",
+              present = c("Strain"),
+              workspace = "2048mb")
+    }
+  }, warning = function(w) {
+    warningMessage <- conditionMessage(w)
+    print(paste("Warning captured:", warningMessage))
+    invokeRestart("muffleWarning")
+  })
+}, error = function(e) {
+  print(paste("Error encountered:", e$message))
+})
+```
+
+
+When we use the `predict()` function in ASReml, two important arguments are:
+
+- `classify`
+- `present`
+
+They control **which predictions are generated**, and **whether we avoid missing values (NAs)** in the output table.
+
+---
+
+## Predict BLUEs by Strain × Test
+
+If there are multiple tests:
+
+```{r, eval=FALSE}
+if (length(Tsts) > 1) {
+  BLUEs_LocT_RR <- tryCatch({
+    predict(model_Loc_RR, classify = "Strain:Test",
+            present = c("Strain", "Test", "Row", "Range"),
+            workspace = "2048mb")
+  }, warning = function(w) {
+    # handle warnings
+  }, error = function(e) {
+    # handle errors
+  })
+} else {
+  BLUEs_LocT_RR <- NULL
+}
+```
+
+---
+
+## Wald Tests
+
+Wald tests are performed to test significance of fixed effects:
+
+```{r, eval=FALSE}
+wald.model_Loc_RR <- tryCatch({
+  wald.asreml(model_Loc_RR)
+}, warning = function(w) {
+  warningMessage <- conditionMessage(w)
+  print(paste("Warning captured:", warningMessage))
+  invokeRestart("muffleWarning")
+}, error = function(e) {
+  print(paste("Error encountered:", e$message))
+})
+```
+
+---
+
+## Save Results
+
+Results are stored in lists:
+
+```{r, eval=FALSE}
+model_Loc_RR_List[[nLoc]] <- model_Loc_RR
+BLUEs_Loc_RR_List[[nLoc]] <- BLUEs_Loc_RR
+BLUEs_LocTst_RR_List[[nLoc]] <- BLUEs_LocT_RR
+wald.model_Loc_RR_List[[nLoc]] <- wald.model_Loc_RR
+```
+
+And finally stored for each trait:
+
+```{r, eval=FALSE}
+model_Loc_RR_Trts_List[[trait]] <- model_Loc_RR_List
+BLUEs_Loc_RR_Trts_List[[trait]] <- BLUEs_Loc_RR_List
+BLUEs_LocTst_RR_Trts_List[[trait]] <- BLUEs_LocTst_RR_List
+wald.model_Loc_RR_Trts_List[[trait]] <- wald.model_Loc_RR_List
+```
+
+---
+
+# Summary
+
+This code fits separate ASReml models for each trait and location, including optional spatial effects (Row and Range) and nested replicate effects. It:
+
+✅ Fits robust models for each location  
+✅ Handles convergence warnings  
+✅ Detects and corrects singularities  
+✅ Predicts BLUEs for strains and strain × test combinations  
+✅ Stores results in a structured way
+

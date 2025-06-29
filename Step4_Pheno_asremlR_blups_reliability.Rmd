@@ -1,0 +1,392 @@
+---
+title: "Demo Code for estimation of BLUPs and Reliability using ASREML with PYT 2024"
+author: "Vishnu Ramasubramanian"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# Introduction
+
+This document explains the R code for fitting **random-effects ASReml models** and estimating BLUPs and reliability (heritability) metrics across multiple traits and locations in plant breeding trials.
+
+The analysis includes:
+
+- random-effects models for genotypes (Strains)
+- spatial fixed-effects models (Row and Range)
+- calculation of BLUPs
+- estimation of reliability (heritability) values
+- comparison of models using AIC
+
+---
+
+# Part 1: Random-Effects Models per Location
+
+## Model Setup
+
+Lists are initialized to store models, predictions, and heritability:
+
+```{r, eval=FALSE}
+
+ modelRnd_Loc_List <- list()
+ BLUPs_Loc_List <- list()
+ BLUPs_LocTst_List <- list()
+ wald.modelRnd_Loc_List <- list()
+ i2_Loc_List <- list()
+
+
+i2_Loc_Trts_List <- list()
+i2_Loc_RR_Trts_List <- list()
+```
+
+---
+
+## Loop Over Traits
+
+For each trait: All the steps are implemented for each of the traits. However this markdown describes the analysis for one trait and one location as for loop is compatible with markdown description
+
+```{r, eval=FALSE}
+for(trait in trait.list){
+  # model fitting steps
+  
+}
+
+  nTrt <- 1
+
+  trait <- trait.list[nTrt]
+  trtInd <- which(!is.na(data.regular[,trait]))
+  data.regular.trait <- data.regular[trtInd,]
+  Locations <- levels(factor((data.regular.trait$Location)))
+  
+ # for(nLoc in 1:length(Locations)){ }  
+  
+    loc <- Locations[nLoc]
+    
+    data.loc <- data.regular.trait[data.regular.trait$Location ==loc,]
+      
+    data.loc$Strain <- as.factor(data.loc$Strain)
+    data.loc$Test <- as.factor(data.loc$Test)
+    data.loc$RepNo <- as.factor(data.loc$RepNo)
+    data.loc$Row <- as.factor(data.loc$Row)
+    data.loc$Range <- as.factor(data.loc$Range)
+    Tsts <- levels(factor(data.loc$Test))
+    data.loc <- droplevels(data.loc)
+ 
+```
+
+Data are filtered for non-missing values, and the analysis loops over locations.
+
+---
+
+## Model Formula
+
+For **Yield** in the first location:
+
+```{r, eval=FALSE}
+ if(trait== "Yield" & nLoc==1){
+      fixedEqn <- paste(trait," ~ Test + RepNo:Test",sep="")
+    }else{ 
+     
+      fixedEqn <- paste(trait," ~ 1 ",sep="")
+    }
+    
+```
+
+#For other traits and locations:
+
+This minimal intercept model improves h² estimation for traits like Oil and Protein.
+
+---
+
+## Fit the Random Model
+
+Fit the model treating Strain as random:
+
+```{r, eval=FALSE}
+
+count <- 1
+    warningMessages <- c()
+    modelRnd_Loc <- tryCatch({
+      withCallingHandlers({
+        asreml(fixed = as.formula(fixedEqn),
+               random=~ Strain,
+               data = data.loc,workspace="2048mb")
+
+      }, warning = function(w){
+        # This function will execute if a warning is issued
+        # Capture the warning message 
+        warningMessage <- conditionMessage(w)
+        print(paste("Warning captured:", warningMessage))
+        if(grepl("not converged",warningMessage)){
+          warningMessages <<-  warningMessage
+        }
+        # Invoke the default warning handler (optional)
+        invokeRestart("muffleWarning")
+      })
+    }, error=function(e) {
+      print(paste("Error encountered:", e$message))
+    })
+    
+```
+
+Convergence warnings are handled with updates:
+
+```{r, eval=FALSE}
+
+ if(!is.null(warningMessages)){
+      while(grepl("not converged", warningMessages[length(warningMessages)]) && count <=5){
+        
+        tryCatch({
+          withCallingHandlers({
+            modelRnd_Loc <- update.asreml(modelRnd_Loc)}, warning=function(w) {
+              warningMessage <- conditionMessage(w) 
+              print(paste("Warning captured:", warningMessage))
+              
+              if(grepl("not converged",warningMessage)){
+                warningMessages <<- warningMessage
+              }else{warningMessages <<- "Iterations converged" 
+              print(paste(warningMessages[length(warningMessages)]))
+              }
+            }
+          )
+        })
+        count <- count+1
+      }
+    }
+```
+
+---
+
+## BLUP Predictions
+
+If the model converges:
+
+```{r, eval=FALSE}
+
+ if(trait == "Yield" & nLoc==1){
+        BLUPs_Loc <- predict(modelRnd_Loc,classify="Strain",present=c("Strain","Test"))
+     
+  }else{
+        BLUPs_Loc <- predict(modelRnd_Loc,classify="Strain",present=c("Strain"))
+  }
+
+```
+
+If multiple tests exist:
+
+```{r, eval=FALSE}
+
+if(length(Tsts)>1){
+        if(trait == "Yield" & nLoc==1){
+          BLUPs_LocT <- predict(modelRnd_Loc,classify="Strain:Test",present=c("Strain","Test"))
+        }else{
+          BLUPs_LocT <- predict(modelRnd_Loc,classify="Strain",present=c("Strain"))
+        }
+}
+```
+
+When we use the `predict()` function in ASReml, two important arguments are:
+
+- `classify`
+- `present`
+
+They control **which predictions are generated**, and **whether we avoid missing values (NAs)** in the output table.
+
+---
+
+## Wald Tests and Heritability
+
+Obtain Wald tests for fixed effects:
+
+```{r, eval=FALSE}
+wald.modelRnd_Loc <- wald.asreml(modelRnd_Loc)
+```
+
+Calculate reliability (heritability) estimates:
+
+```{r, eval=FALSE}
+i2_Loc <- vpredict(modelRnd_Loc, h2 ~ V1 / (V1 + V2))
+```
+
+---
+
+# Part 2: Random-Effects Models with Row/Range
+
+## Model Setup
+
+Additional lists for Row/Range models:
+
+```{r}
+modelRnd_Loc_RR_Trts_List <- list()
+BLUPs_Loc_RR_Trts_List <- list()
+i2_Loc_RR_Trts_List <- list()
+wald.modelRnd_Loc_RR_Trts_List <- list()
+```
+
+---
+
+## Fixed Effects Model
+
+For **Yield** in the first location:
+
+```{r, eval=FALSE}
+
+      if(trait== "Yield" & nLoc==1){
+        fixedEqnRR <- paste(trait," ~ Test + Row + Range + RepNo:Test",sep="")
+      }else{ 
+        fixedEqnRR <- paste(trait," ~ 1",sep="")
+      }
+      
+```
+
+Otherwise:
+
+```{r, eval=FALSE}
+fixedEqnRR <- paste(trait, "~ 1", sep="")
+```
+
+---
+
+## Fit the Model
+
+Random model with Strain effect:
+
+```{r, eval=FALSE}
+ count <- 1
+      warningMessages <- c()
+      modelRnd_Loc_RR <- tryCatch({
+        withCallingHandlers({
+          asreml(fixed = as.formula(fixedEqnRR),
+                 random=~ Strain,
+                 data = data.loc, workspace="2048mb")
+          
+        }, warning = function(w){
+          # This function will execute if a warning is issued
+          # Capture the warning message 
+          warningMessage <- conditionMessage(w)
+          print(paste("Warning captured:", warningMessage))
+          if(grepl("not converged",warningMessage)){
+            warningMessages <<-  warningMessage
+          }
+          # Invoke the default warning handler (optional)
+          invokeRestart("muffleWarning")
+        })
+      }, error=function(e) {
+        print(paste("Error encountered:", e$message))
+      })
+```
+
+Convergence issues are handled via updates.
+
+---
+```{r ,eval=FALSE}
+
+ # Check if the warning message contains the specific pattern "1%"
+        if(!is.null(warningMessages)){
+          while(grepl("not converged", warningMessages[length(warningMessages)]) && count <=5){
+            
+            tryCatch({
+              withCallingHandlers({
+                modelRnd_Loc_RR <- update.asreml(modelRnd_Loc_RR)}, warning=function(w) {
+                  warningMessage <- conditionMessage(w) 
+                  print(paste("Warning captured:", warningMessage))
+                  
+                  if(grepl("not converged",warningMessage)){
+                    warningMessages <<- warningMessage
+                  }else{warningMessages <<- "Iterations converged" 
+                  print(paste(warningMessages[length(warningMessages)]))
+                  }
+                }
+              )
+            })
+            count <- count+1
+          }
+        }
+
+```
+
+
+## BLUP Predictions
+
+Predictions for Row/Range model:
+
+```{r, eval=FALSE}
+  if(trait== "Yield" & nLoc==1){
+        BLUPs_Loc_RR <-predict(modelRnd_Loc_RR,classify="Strain",present=c("Strain","Test","Row","Range"))
+  }else{ 
+          BLUPs_Loc_RR <-predict(modelRnd_Loc_RR,classify="Strain",present=c("Strain"))
+  }
+
+  
+   if(length(Tsts)>1){
+          if(trait== "Yield" & nLoc==1){
+           BLUPs_LocT_RR <- predict(modelRnd_Loc_RR,classify="Strain:Test",present=c("Strain","Test","Row","Range"))
+          }else{ 
+            BLUPs_LocT_RR <-predict(modelRnd_Loc_RR,classify="Strain",present=c("Strain"))
+          }
+   }
+ 
+```
+
+Or simply by Strain if Row/Range are excluded.
+
+---
+
+## Wald Tests and Heritability
+
+Wald tests:
+
+```{r, eval=FALSE}
+wald.modelRnd_Loc_RR <- wald.asreml(modelRnd_Loc_RR)
+```
+
+Heritability estimates:
+
+```{r, eval=FALSE}
+i2_Loc_RR <- vpredict(modelRnd_Loc_RR, h2 ~ V1 / (V1 + V2))
+```
+
+---
+
+# Part 3: Model Comparison with AIC
+
+For each trait, AIC values are compared:
+
+```{r, eval=FALSE}
+AICTable_Rnd[nLoc, 1] <- summary(modelRnd_Loc_List[[nLoc]])$aic
+AICTable_Rnd[nLoc, 2] <- summary(modelRnd_Loc_RR_List[[nLoc]])$aic
+```
+
+Models with spatial terms (Row/Range) are evaluated against simpler random-only models.
+
+---
+
+# Part 4: Summarizing Heritability Estimates
+
+All heritability values across locations and traits are compiled:
+
+```{r, eval=FALSE}
+h2_Estimates_Tab <- do.call(cbind.data.frame, lapply(i2_Loc_RR_Trts_List, function(x)
+  do.call(rbind.data.frame, lapply(x, function(y) y))))
+h2_Estimates_Tab <- apply(h2_Estimates_Tab, 2, function(x) round(x, 3))
+write.csv(h2_Estimates_Tab, "PYT24_H2_LocWise.csv", quote = FALSE)
+```
+
+This generates a table of location-wise h² estimates for all traits.
+
+---
+
+# Summary
+
+This code section:
+
+✅ fits random models for genotype BLUP estimation  
+✅ handles convergence with iterative updates  
+✅ fits optional Row/Range spatial models  
+✅ calculates location-specific heritability  
+✅ stores all outputs for further analysis
+
+

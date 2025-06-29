@@ -1,0 +1,437 @@
+---
+title: "Demo of Asreml R base models for estimation of BLUEs with PYT 2024 data"
+author: "Vishnu Ramasubramanian"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+
+# ASReml R Code – Detailed Comments and Model Explanation
+
+This document explains the provided R script for running ASReml models over multiple traits and locations in field trial data.
+
+------------------------------------------------------------------------
+
+## Purpose of the Code
+
+The goal of this R script is to fit location-specific **linear models** (using ASReml) for several traits measured in field trials (e.g. Yield, Maturity rating, Protein, Oil, etc.). For each **trait × location** combination, the script:
+
+-   fits a model,
+-   obtains BLUEs (Best Linear Unbiased Estimates),
+-   optionally predicts strain means within each test,
+-   extracts Wald test statistics.
+
+Finally, predictions (BLUEs) are compiled into summary tables for further analysis.
+
+------------------------------------------------------------------------
+
+## Detailed Code Walkthrough and Comments
+
+Below is a detailed walk-through of the code, with explanations and comments.
+
+------------------------------------------------------------------------
+
+## Data Preparation
+
+``` r
+# Find the column named "Book.Name" and rename it to "Location"
+locInd <- which(colnames(data.regular) %in% "Book.Name")
+colnames(data.regular)[locInd] <- "Location"
+
+# Get all unique locations in the data
+Locations0 <- levels(factor(data.regular$Location))
+Locations <- Locations0
+```
+
+-   Renames “Book.Name” → “Location”.
+-   Sets up a list of unique trial locations.
+
+------------------------------------------------------------------------
+
+## Initialize Storage Lists
+
+All these lists store model results for different traits:
+
+``` r
+model_Loc_Trts_List <- list()
+model_Loc_RR_Trts_List <- list()
+
+BLUEs_Loc_Trts_List <- list()
+BLUEs_Loc_RR_Trts_List <- list()
+
+BLUEs_LocTst_Trts_List <- list()
+BLUEs_LocTst_RR_Trts_List <- list()
+
+wald.model_Loc_Trts_List <- list()
+wald.model_Loc_RR_Trts_List <- list()
+
+BLUEs_LocTest_Tab_List <- list() 
+BLUEs_LocTest_Tab_RR_List <- list()
+
+BLUEs_Loc_Tab_List <- list()
+BLUEs_Loc_Tab_RR_List <- list()
+
+AICTable_Trts_List <- list()
+```
+
+------------------------------------------------------------------------
+
+## Loop Over Traits
+
+The analysis runs separately for each trait in your list:
+
+``` r
+for(trait in trait.list){
+```
+
+------------------------------------------------------------------------
+
+### Prepare Data for the Trait
+
+``` r
+  trtInd <- which(!is.na(data.regular[,trait]))
+  data.regular.trait <- data.regular[trtInd,]
+  
+  data.regular.trait$Location <- as.factor(data.regular.trait$Location)
+  
+  Locations <- levels(factor((data.regular.trait$Location)))
+```
+
+-   Removes missing values for the current trait.
+-   Re-computes the list of unique locations.
+
+------------------------------------------------------------------------
+
+### Loop Over Locations
+
+``` r
+  for(nLoc in 1:length(Locations)){
+    loc <- Locations[nLoc]
+    data.loc <- data.regular.trait[data.regular.trait$Location == loc,]
+```
+
+Works one **location at a time.**
+
+------------------------------------------------------------------------
+
+### Convert Factors
+
+``` r
+    data.loc$Strain <- as.factor(data.loc$Strain)
+    data.loc$Test <- as.factor(data.loc$Test)
+    data.loc$RepNo <- as.factor(data.loc$RepNo)
+    data.loc$Row <- as.factor(data.loc$Row)
+    data.loc$Range <- as.factor(data.loc$Range)
+    Tsts <- levels(factor(data.loc$Test))
+    data.loc <- droplevels(data.loc)
+```
+
+Ensures categorical variables are factors for ASReml.
+
+------------------------------------------------------------------------
+
+### Specify the Model
+
+Two different model specifications depending on the trait:
+
+``` r
+    if(trait== "Yield" | trait=="Maturity.rating"){
+      fixedEqn <- paste(trait," ~ Test +  Strain  + RepNo:Test",sep="")
+    }else{ 
+      fixedEqn <- paste(trait," ~ Strain",sep="")
+    }
+```
+
+#### Explanation:
+
+-   For **Yield** and **Maturity.rating**:
+
+    $$
+      y_{ijk} = \mu + \text{Test}_i + \text{Strain}_j + (\text{RepNo}:\text{Test})_k + \varepsilon_{ijk}
+      $$
+
+    -   Test = different experimental trials at this location.
+    -   RepNo:Test = replicates nested within test.
+    -   Strain = genotype effect.
+
+-   For other traits (e.g. Oil, Protein):
+
+    $$
+      y_j = \mu + \text{Strain}_j + \varepsilon_j
+      $$
+
+A simpler model with no test effect.
+
+------------------------------------------------------------------------
+
+## Fit the ASReml Model
+
+This is the core fitting:
+
+``` r
+    count <- 1
+    warningMessages <- c()
+    model_Loc <- tryCatch({
+      withCallingHandlers({
+        asreml(fixed = as.formula(fixedEqn),
+               data = data.loc,workspace="2048mb",ai.sing=TRUE)
+      }, warning = function(w){
+        warningMessage <- conditionMessage(w)
+        print(paste("Warning captured:", warningMessage))
+        if(grepl("not converged",warningMessage)){
+          warningMessages <<-  warningMessage
+        }
+        invokeRestart("muffleWarning")
+      })
+    }, error=function(e) {
+      print(paste("Error encountered:", e$message))
+    })
+```
+
+-   Fits the ASReml model for this location and trait.
+-   Captures warnings about convergence.
+
+------------------------------------------------------------------------
+
+## Refitting if Not Converged
+
+If model did not converge:
+
+``` r
+    if(!is.null(warningMessages)){
+      while(grepl("not converged", warningMessages[length(warningMessages)]) && count <=5){
+        
+        tryCatch({
+          withCallingHandlers({
+            model_Loc <- update.asreml(model_Loc)
+          }, warning=function(w) {
+            warningMessage <- conditionMessage(w) 
+            print(paste("Warning captured:", warningMessage))
+            
+            if(grepl("not converged",warningMessage)){
+              warningMessages <<- warningMessage
+            }else{
+              warningMessages <<- "Iterations converged" 
+              print(paste(warningMessages[length(warningMessages)]))
+            }
+          })
+        })
+        count <- count+1
+      }
+    }
+```
+
+-   If convergence fails, the code attempts up to **5 updates** via `update.asreml()`.
+
+------------------------------------------------------------------------
+
+## Predictions and BLUEs
+
+If model fit was successful:
+
+``` r
+    if(length(model_Loc)>1){
+```
+
+A non-empty ASReml object signals a successful fit.
+
+------------------------------------------------------------------------
+
+### BLUEs across strains
+
+``` r
+      BLUEs_Loc <- tryCatch({
+          withCallingHandlers({
+            if(trait !="Oil" & trait != "Protein"){
+             predict(model_Loc,classify="Strain",present=c("Strain","Test"),workspace="2048mb")
+            }else if (trait =="Oil" | trait == "Protein"){ 
+              predict(model_Loc,classify="Strain",present="Strain",workspace="2048mb")
+            }
+          }, warning = function(w){
+            warningMessage <- conditionMessage(w)
+            print(paste("Warning captured:", warningMessage))
+            if(grepl("not converged",warningMessage)){
+              warningMessages <<-  warningMessage
+            }
+            invokeRestart("muffleWarning")
+          })
+        }, error=function(e) {
+          print(paste("Error encountered:", e$message))
+      })
+```
+
+This produces **location-specific BLUEs** of strain means.
+
+------------------------------------------------------------------------
+
+### BLUEs by Strain × Test
+
+``` r
+      if(length(Tsts)>1){
+        
+        BLUEs_LocT <- tryCatch({
+            withCallingHandlers({
+              
+              if(trait !="Oil" & trait != "Protein"){
+                 predict(model_Loc,classify="Strain:Test",present=c("Strain","Test"),workspace="2048mb")
+              }else if (trait =="Oil" | trait == "Protein"){ 
+                predict(model_Loc,classify="Strain",present="Strain",workspace="2048mb")
+              }
+            }, warning = function(w){
+              warningMessage <- conditionMessage(w)
+              print(paste("Warning captured:", warningMessage))
+              if(grepl("not converged",warningMessage)){
+                warningMessages <<-  warningMessage
+              }
+              invokeRestart("muffleWarning")
+            })
+          }, error=function(e) {
+            print(paste("Error encountered:", e$message))
+          })
+      }else{BLUEs_LocT <- NULL}
+```
+
+For multiple tests at the same location, predict strain means **within each test.**
+
+------------------------------------------------------------------------
+
+## Wald Tests
+
+Calculates Wald tests on fixed effects:
+
+``` r
+      wald.model_Loc <- tryCatch({
+        withCallingHandlers({
+          wald.asreml(model_Loc)
+        }, warning = function(w){
+          warningMessage <- conditionMessage(w)
+          print(paste("Warning captured:", warningMessage))
+          if(grepl("not converged",warningMessage)){
+            warningMessages <<- warningMessage
+          }
+          invokeRestart("muffleWarning")
+        })
+      }, error=function(e) {
+        print(paste("Error encountered:", e$message))
+      })
+```
+
+-   Tests the significance of fixed effects (e.g. Strain, Test).
+
+------------------------------------------------------------------------
+
+## Store Results
+
+Store everything into lists:
+
+``` r
+    model_Loc_List[[nLoc]] <- model_Loc
+    BLUEs_Loc_List[[nLoc]] <- BLUEs_Loc
+    BLUEs_LocTst_List[[nLoc]] <- BLUEs_LocT
+    wald.model_Loc_List[[nLoc]] <- wald.model_Loc
+```
+
+------------------------------------------------------------------------
+
+## Combine Results Across Locations
+
+After looping over locations, we consolidate results for the trait.
+
+``` r
+  model_Loc_Trts_List[[trait]] <-  model_Loc_List
+  BLUEs_Loc_Trts_List[[trait]] <- BLUEs_Loc_List
+  BLUEs_LocTst_Trts_List[[trait]] <- BLUEs_LocTst_List
+  wald.model_Loc_Trts_List[[trait]] <-  wald.model_Loc_List
+```
+
+------------------------------------------------------------------------
+
+## Compile BLUEs into Tables
+
+Finally, the second loop assembles tables.
+
+### BLUEs across locations
+
+``` r
+  nLocations <- length(Locations)
+  BLUEs_Loc_Tab <- do.call(rbind,lapply(c(1:nLocations),function(x) {
+    if(!is.na(BLUEs_Loc_List[[x]])[[1]]){
+      outTab <- BLUEs_Loc_List[[x]]
+      filtInd <- which(outTab$pvals$status %in% "Estimable")
+      cbind.data.frame(outTab$pvals$Strain[filtInd],
+                       rep(Locations[x],length(filtInd)),
+                       outTab$pvals$predicted.value[filtInd])
+    }else{NULL}
+  }))
+  
+ colnames(BLUEs_Loc_Tab) <- c("Strain","Loc","BLUEs") 
+```
+
+Outputs:
+
+-   Strain
+-   Location
+-   BLUE estimate
+
+------------------------------------------------------------------------
+
+### BLUEs by Strain × Test × Location
+
+``` r
+ nLocations <- length(Locations)
+ BLUEs_LocTest_Tab <- do.call(rbind.data.frame,lapply(c(1:nLocations),function(x) {
+      if((trait!="Oil" & trait!="Protein")){
+        ...
+      }else if(trait=="Oil" | trait=="Protein"){
+        ...
+      }
+ }))
+```
+
+Produces strain × test means (where applicable).
+
+------------------------------------------------------------------------
+
+## Store Compiled Tables
+
+``` r
+BLUEs_Loc_Tab_List[[trait]] <- BLUEs_Loc_Tab
+BLUEs_LocTest_Tab_List[[trait]] <- BLUEs_LocTest_Tab
+```
+
+------------------------------------------------------------------------
+
+## What Does the ASReml Model Do Here?
+
+ASReml models:
+
+-   **Fixed effects**:
+    -   Strain (genotype)
+    -   Test (for some traits)
+    -   RepNo nested within Test (for some traits)
+-   **Random effects**:
+    -   None explicitly included in the current formula (though ASReml always models residual variance).
+
+This pipeline essentially:
+
+-   fits separate models at each location,
+-   estimates strain means (BLUEs) per location,
+-   optionally estimates strain means per test × location,
+-   computes Wald tests for significance of fixed effects.
+
+------------------------------------------------------------------------
+
+## In Summary
+
+It’s a **location-wise fixed-effect modeling pipeline** for multi-trait data in plant breeding trials. 
+
+
+✅ loops through traits\
+✅ fits ASReml models per location\
+✅ extracts strain BLUEs\
+✅ handles convergence issues robustly\
+✅ stores all results neatly for later use
